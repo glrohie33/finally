@@ -101,3 +101,37 @@ class TestPriceCache:
         cache = PriceCache()
         update = cache.update("AAPL", 190.12345)
         assert update.price == 190.12
+
+    def test_timestamp_zero_is_preserved(self):
+        """timestamp=0.0 must not be treated as falsy and replaced with now."""
+        cache = PriceCache()
+        update = cache.update("AAPL", 190.00, timestamp=0.0)
+        assert update.timestamp == 0.0
+
+    def test_version_thread_safe(self):
+        """version property should return consistent int under concurrent writes."""
+        import threading
+
+        cache = PriceCache()
+        errors = []
+
+        def writer():
+            for _ in range(100):
+                cache.update("AAPL", 190.00)
+
+        def reader():
+            for _ in range(100):
+                try:
+                    v = cache.version
+                    assert isinstance(v, int)
+                except Exception as e:
+                    errors.append(e)
+
+        threads = [threading.Thread(target=writer) for _ in range(3)]
+        threads += [threading.Thread(target=reader) for _ in range(3)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        assert errors == []

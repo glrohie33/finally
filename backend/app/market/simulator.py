@@ -185,7 +185,7 @@ class GBMSimulator:
         tech = CORRELATION_GROUPS["tech"]
         finance = CORRELATION_GROUPS["finance"]
 
-        # TSLA is in tech set but behaves independently
+        # TSLA is excluded from both sector groups; it does its own thing
         if t1 == "TSLA" or t2 == "TSLA":
             return TSLA_CORR
 

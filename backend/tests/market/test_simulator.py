@@ -129,3 +129,20 @@ class TestGBMSimulator:
         if '.' in price_str:
             decimal_part = price_str.split('.')[1]
             assert len(decimal_part) <= 2
+
+    def test_duplicate_tickers_in_init(self):
+        """Duplicate tickers passed to __init__ should result in only one entry."""
+        sim = GBMSimulator(tickers=["AAPL", "AAPL"])
+        assert len(sim.get_tickers()) == 1
+        assert sim.get_tickers() == ["AAPL"]
+
+    def test_full_default_watchlist_cholesky(self):
+        """Full 10-ticker default watchlist must build a valid Cholesky matrix."""
+        tickers = ["AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", "NVDA", "META", "JPM", "V", "NFLX"]
+        sim = GBMSimulator(tickers=tickers)
+        assert sim._cholesky is not None
+        assert sim._cholesky.shape == (10, 10)
+        # One full step must return all 10 tickers with positive prices
+        result = sim.step()
+        assert set(result.keys()) == set(tickers)
+        assert all(p > 0 for p in result.values())
