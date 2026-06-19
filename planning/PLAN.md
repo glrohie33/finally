@@ -12,7 +12,7 @@ This is the capstone project for an agentic AI coding course. It is built entire
 
 ### First Launch
 
-The user runs a single Docker command (or a provided start script). A browser opens to `http://localhost:8000`. No login, no signup. They immediately see:
+The user runs a single start script. A browser opens to `http://localhost:8000`. No login, no signup. They immediately see:
 
 - A watchlist of 10 default tickers with live-updating prices in a grid
 - $10,000 in virtual cash
@@ -45,26 +45,35 @@ The user runs a single Docker command (or a provided start script). A browser op
 
 ## 3. Architecture Overview
 
-### Single Container, Single Port
+### Single Port, Two Modes
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  Docker Container (port 8000)                   │
-│                                                 │
-│  FastAPI (Python/uv)                            │
-│  ├── /api/*          REST endpoints             │
-│  ├── /api/stream/*   SSE streaming              │
-│  └── /*              Static file serving         │
-│                      (Next.js export)            │
-│                                                 │
-│  SQLite database (volume-mounted)               │
-│  Background task: market data polling/sim        │
+│  Production-like (single port, port 8000)        │
+│                                                  │
+│  FastAPI (Python/uv)                             │
+│  ├── /api/*          REST endpoints              │
+│  ├── /api/stream/*   SSE streaming               │
+│  └── /*              Static file serving          │
+│                      (Next.js export)             │
+│                                                  │
+│  SQLite database (db/finally.db)                 │
+│  Background task: market data polling/sim         │
+└─────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────┐
+│  Development mode (two processes)                │
+│                                                  │
+│  FastAPI     port 8000  — API + SSE              │
+│  Next.js     port 3000  — dev server             │
+│                                                  │
+│  Next.js rewrites proxy /api/* → localhost:8000  │
 └─────────────────────────────────────────────────┘
 ```
 
-- **Frontend**: Next.js with TypeScript, built as a static export (`output: 'export'`), served by FastAPI as static files
+- **Frontend**: Next.js with TypeScript, built as a static export (`output: 'export'`), served by FastAPI as static files in production-like mode; runs as a dev server on port 3000 during development
 - **Backend**: FastAPI (Python), managed as a `uv` project
-- **Database**: SQLite, single file at `db/finally.db`, volume-mounted for persistence
+- **Database**: SQLite, single file at `db/finally.db` in the project root
 - **Real-time data**: Server-Sent Events (SSE) — simpler than WebSockets, one-way server→client push, works everywhere
 - **AI integration**: LiteLLM → OpenRouter (Cerebras for fast inference), with structured outputs for trade execution
 - **Market data**: Environment-variable driven — simulator by default, real data via Massive API if key provided
@@ -74,11 +83,11 @@ The user runs a single Docker command (or a provided start script). A browser op
 | Decision | Rationale |
 |---|---|
 | SSE over WebSockets | One-way push is all we need; simpler, no bidirectional complexity, universal browser support |
-| Static Next.js export | Single origin, no CORS issues, one port, one container, simple deployment |
+| Static Next.js export | Single origin, no CORS issues, one port, simple deployment and serving |
 | SQLite over Postgres | No auth = no multi-user = no need for a database server; self-contained, zero config |
-| Single Docker container | Students run one command; no docker-compose for production, no service orchestration |
 | uv for Python | Fast, modern Python project management; reproducible lockfile; what students should learn |
 | Market orders only | Eliminates order book, limit order logic, partial fills — dramatically simpler portfolio math |
+| Next.js rewrites in dev | Proxies `/api/*` to the FastAPI backend; no CORS configuration needed in either mode |
 
 ---
 
@@ -88,20 +97,18 @@ The user runs a single Docker command (or a provided start script). A browser op
 finally/
 ├── frontend/                 # Next.js TypeScript project (static export)
 ├── backend/                  # FastAPI uv project (Python)
-│   └── db/                   # Schema definitions, seed data, migration logic
+│   └── schema/               # Schema definitions, seed data, migration logic
 ├── planning/                 # Project-wide documentation for agents
 │   ├── PLAN.md               # This document
 │   └── ...                   # Additional agent reference docs
 ├── scripts/
-│   ├── start_mac.sh          # Launch Docker container (macOS/Linux)
-│   ├── stop_mac.sh           # Stop Docker container (macOS/Linux)
-│   ├── start_windows.ps1     # Launch Docker container (Windows PowerShell)
-│   └── stop_windows.ps1      # Stop Docker container (Windows PowerShell)
-├── test/                     # Playwright E2E tests + docker-compose.test.yml
-├── db/                       # Volume mount target (SQLite file lives here at runtime)
-│   └── .gitkeep              # Directory exists in repo; finally.db is gitignored
-├── Dockerfile                # Multi-stage build (Node → Python)
-├── docker-compose.yml        # Optional convenience wrapper
+│   ├── start.sh              # Install deps, build frontend, start backend (macOS/Linux)
+│   ├── stop.sh               # Stop the backend process (macOS/Linux)
+│   ├── start_windows.ps1     # Install deps, build frontend, start backend (Windows PowerShell)
+│   └── stop_windows.ps1      # Stop the backend process (Windows PowerShell)
+├── test/                     # Playwright E2E tests
+├── db/                       # SQLite file lives here at runtime (gitignored)
+│   └── .gitkeep              # Keeps the directory in version control
 ├── .env                      # Environment variables (gitignored, .env.example committed)
 └── .gitignore
 ```
@@ -110,11 +117,11 @@ finally/
 
 - **`frontend/`** is a self-contained Next.js project. It knows nothing about Python. It talks to the backend via `/api/*` endpoints and `/api/stream/*` SSE endpoints. Internal structure is up to the Frontend Engineer agent.
 - **`backend/`** is a self-contained uv project with its own `pyproject.toml`. It owns all server logic including database initialization, schema, seed data, API routes, SSE streaming, market data, and LLM integration. Internal structure is up to the Backend/Market Data agents.
-- **`backend/db/`** contains schema SQL definitions and seed logic. The backend lazily initializes the database on first request — creating tables and seeding default data if the SQLite file doesn't exist or is empty.
-- **`db/`** at the top level is the runtime volume mount point. The SQLite file (`db/finally.db`) is created here by the backend and persists across container restarts via Docker volume.
+- **`backend/schema/`** contains schema SQL definitions and seed logic. The backend lazily initializes the database on first request — creating tables and seeding default data if the SQLite file doesn't exist or is empty.
+- **`db/`** at the top level is where the SQLite file (`db/finally.db`) is written at runtime. The directory is tracked in git via `.gitkeep`; the database file itself is gitignored.
 - **`planning/`** contains project-wide documentation, including this plan. All agents reference files here as the shared contract.
-- **`test/`** contains Playwright E2E tests and supporting infrastructure (e.g., `docker-compose.test.yml`). Unit tests live within `frontend/` and `backend/` respectively, following each framework's conventions.
-- **`scripts/`** contains start/stop scripts that wrap Docker commands.
+- **`test/`** contains Playwright E2E tests. Unit tests live within `frontend/` and `backend/` respectively, following each framework's conventions.
+- **`scripts/`** contains start/stop scripts that install dependencies, build the frontend, and manage the backend process.
 
 ---
 
@@ -130,6 +137,9 @@ MASSIVE_API_KEY=
 
 # Optional: Set to "true" for deterministic mock LLM responses (testing)
 LLM_MOCK=false
+
+# Optional: LLM model identifier (defaults to openrouter/openai/gpt-oss-120b with Cerebras inference)
+LLM_MODEL=
 ```
 
 ### Behavior
@@ -137,7 +147,8 @@ LLM_MOCK=false
 - If `MASSIVE_API_KEY` is set and non-empty → backend uses Massive REST API for market data
 - If `MASSIVE_API_KEY` is absent or empty → backend uses the built-in market simulator
 - If `LLM_MOCK=true` → backend returns deterministic mock LLM responses (for E2E tests)
-- The backend reads `.env` from the project root (mounted into the container or read via docker `--env-file`)
+- If `LLM_MODEL` is set and non-empty → backend uses that model; if absent, defaults to `openrouter/openai/gpt-oss-120b`
+- The backend reads `.env` from the project root via `python-dotenv` on startup
 
 ---
 
@@ -175,7 +186,7 @@ Both the simulator and the Massive client implement the same abstract interface.
 
 - Endpoint: `GET /api/stream/prices`
 - Long-lived SSE connection; client uses native `EventSource` API
-- Server pushes price updates for all tickers known to the system at a regular cadence (~500ms) — in the single-user model this is equivalent to the user's watchlist
+- Server pushes price updates for all tickers known to the system; cadence is source-dependent (~500ms with the simulator, ~15s on the Massive free tier). The SSE layer skips emitting if a ticker's price hasn't changed since the last push, so the client only receives meaningful updates regardless of source.
 - Each SSE event contains ticker, price, previous price, timestamp, and change direction
 - Client handles reconnection automatically (EventSource has built-in retry)
 
@@ -189,7 +200,7 @@ The backend checks for the SQLite database on startup (or first request). If the
 
 - No separate migration step
 - No manual database setup
-- Fresh Docker volumes start with a clean, seeded database automatically
+- A fresh `db/` directory produces a clean, seeded database automatically on first run
 
 ### Schema
 
@@ -201,20 +212,18 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 - `created_at` TEXT (ISO timestamp)
 
 **watchlist** — Tickers the user is watching
-- `id` TEXT PRIMARY KEY (UUID)
 - `user_id` TEXT (default: `"default"`)
 - `ticker` TEXT
 - `added_at` TEXT (ISO timestamp)
-- UNIQUE constraint on `(user_id, ticker)`
+- PRIMARY KEY `(user_id, ticker)`
 
 **positions** — Current holdings (one row per ticker per user)
-- `id` TEXT PRIMARY KEY (UUID)
 - `user_id` TEXT (default: `"default"`)
 - `ticker` TEXT
 - `quantity` REAL (fractional shares supported)
 - `avg_cost` REAL
 - `updated_at` TEXT (ISO timestamp)
-- UNIQUE constraint on `(user_id, ticker)`
+- PRIMARY KEY `(user_id, ticker)`
 
 **trades** — Trade history (append-only log)
 - `id` TEXT PRIMARY KEY (UUID)
@@ -243,6 +252,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 
 - One user profile: `id="default"`, `cash_balance=10000.0`
 - Ten watchlist entries: AAPL, GOOGL, MSFT, AMZN, TSLA, NVDA, META, JPM, V, NFLX
+- One initial portfolio snapshot: `total_value=10000.0` recorded at DB initialization time — ensures the P&L chart has at least one data point immediately on first load
 
 ---
 
@@ -281,7 +291,7 @@ All tables include a `user_id` column defaulting to `"default"`. This is hardcod
 
 ## 9. LLM Integration
 
-When writing code to make calls to LLMs, use cerebras-inference skill to use LiteLLM via OpenRouter to the `openrouter/openai/gpt-oss-120b` model with Cerebras as the inference provider. Structured Outputs should be used to interpret the results.
+When writing code to make calls to LLMs, use cerebras-inference skill to use LiteLLM via OpenRouter. The model is read from the `LLM_MODEL` environment variable, defaulting to `openrouter/openai/gpt-oss-120b` with Cerebras as the inference provider. Structured Outputs should be used to interpret the results.
 
 There is an OPENROUTER_API_KEY in the .env file in the project root.
 
@@ -290,7 +300,7 @@ There is an OPENROUTER_API_KEY in the .env file in the project root.
 When the user sends a chat message, the backend:
 
 1. Loads the user's current portfolio context (cash, positions with P&L, watchlist with live prices, total portfolio value)
-2. Loads recent conversation history from the `chat_messages` table
+2. Loads the last 40 messages of conversation history from the `chat_messages` table
 3. Constructs a prompt with a system message, portfolio context, conversation history, and the user's new message
 4. Calls the LLM via LiteLLM → OpenRouter, requesting structured output, using the cerebras-inference skill
 5. Parses the complete structured JSON response
@@ -316,7 +326,16 @@ The LLM is instructed to respond with JSON matching this schema:
 
 - `message` (required): The conversational text shown to the user
 - `trades` (optional): Array of trades to auto-execute. Each trade goes through the same validation as manual trades (sufficient cash for buys, sufficient shares for sells)
-- `watchlist_changes` (optional): Array of watchlist modifications
+- `watchlist_changes` (optional): Array of watchlist modifications. Valid `action` values: `"add"` or `"remove"`
+
+The `actions` field stored in `chat_messages` after execution mirrors this shape and records only what was actually carried out:
+
+```json
+{
+  "trades": [{"ticker": "AAPL", "side": "buy", "quantity": 10, "price": 191.50}],
+  "watchlist_changes": [{"ticker": "PYPL", "action": "add"}]
+}
+```
 
 ### Auto-Execution
 
@@ -357,7 +376,7 @@ The frontend is a single-page application with a dense, terminal-inspired layout
 - **Portfolio heatmap** — treemap visualization where each rectangle is a position, sized by portfolio weight, colored by P&L (green = profit, red = loss)
 - **P&L chart** — line chart showing total portfolio value over time, using data from `portfolio_snapshots`
 - **Positions table** — tabular view of all positions: ticker, quantity, avg cost, current price, unrealized P&L, % change
-- **Trade bar** — simple input area: ticker field, quantity field, buy button, sell button. Market orders, instant fill.
+- **Trade bar** — simple input area: ticker field, quantity field, buy button, sell button. Market orders, instant fill. Clicking a ticker in the watchlist auto-populates the trade bar's ticker field.
 - **AI chat panel** — docked/collapsible sidebar. Message input, scrolling conversation history, loading indicator while waiting for LLM response. Trade executions and watchlist changes shown inline as confirmations.
 - **Header** — portfolio total value (updating live), connection status indicator, cash balance
 
@@ -366,60 +385,73 @@ The frontend is a single-page application with a dense, terminal-inspired layout
 - Use `EventSource` for SSE connection to `/api/stream/prices`
 - Canvas-based charting library preferred (Lightweight Charts or Recharts) for performance
 - Price flash effect: on receiving a new price, briefly apply a CSS class with background color transition, then remove it
-- All API calls go to the same origin (`/api/*`) — no CORS configuration needed
+- In production-like mode, all API calls go to the same origin (`/api/*`) — no CORS configuration needed. In development mode, `next.config.js` rewrites `/api/*` to `http://localhost:8000/api/*`, so the browser always talks same-origin and no CORS headers are required on the backend.
 - Tailwind CSS for styling with a custom dark theme
 
 ---
 
-## 11. Docker & Deployment
+## 11. Running Locally
 
-### Multi-Stage Dockerfile
+### Prerequisites
 
-```
-Stage 1: Node 20 slim
-  - Copy frontend/
-  - npm install && npm run build (produces static export)
+| Tool | Version | Install |
+|------|---------|---------|
+| Python | 3.12+ | [python.org](https://www.python.org/downloads/) |
+| uv | latest | `pip install uv` or `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| Node.js | 20+ | [nodejs.org](https://nodejs.org/) |
 
-Stage 2: Python 3.12 slim
-  - Install uv
-  - Copy backend/
-  - uv sync (install Python dependencies from lockfile)
-  - Copy frontend build output into a static/ directory
-  - Expose port 8000
-  - CMD: uvicorn serving FastAPI app
-```
+### Production-like Mode (Recommended)
 
-FastAPI serves the static frontend files and all API routes on port 8000.
+FastAPI serves everything on a single port. The frontend is pre-built as a static export.
 
-### Docker Volume
-
-The SQLite database persists via a named Docker volume:
+**`scripts/start.sh`** (macOS/Linux) does the following:
+1. Runs `npm install && npm run build` in `frontend/` — produces a static export in `frontend/out/`
+2. Copies `frontend/out/` to `backend/static/`
+3. Runs `uv sync` in `backend/` — installs Python dependencies from the lockfile
+4. Starts `uvicorn` serving the FastAPI app on port 8000
+5. Prints `http://localhost:8000` and optionally opens the browser
 
 ```bash
-docker run -v finally-data:/app/db -p 8000:8000 --env-file .env finally
+./scripts/start.sh
 ```
 
-The `db/` directory in the project root maps to `/app/db` in the container. The backend writes `finally.db` to this path.
+**`scripts/stop.sh`** kills the uvicorn process. The SQLite database at `db/finally.db` is preserved.
 
-### Start/Stop Scripts
+```bash
+./scripts/stop.sh
+```
 
-**`scripts/start_mac.sh`** (macOS/Linux):
-- Builds the Docker image if not already built (or if `--build` flag passed)
-- Runs the container with the volume mount, port mapping, and `.env` file
-- Prints the URL to access the app
-- Optionally opens the browser
+**`scripts/start_windows.ps1`** / **`scripts/stop_windows.ps1`**: PowerShell equivalents with identical behavior.
 
-**`scripts/stop_mac.sh`** (macOS/Linux):
-- Stops and removes the running container
-- Does NOT remove the volume (data persists)
+All scripts are idempotent — safe to run multiple times.
 
-**`scripts/start_windows.ps1`** / **`scripts/stop_windows.ps1`**: PowerShell equivalents for Windows.
+### Development Mode
 
-All scripts should be idempotent — safe to run multiple times.
+Run the backend and frontend as separate processes for hot-reloading on both sides.
 
-### Optional Cloud Deployment
+**Terminal 1 — backend:**
+```bash
+cd backend
+uv sync
+uv run uvicorn app.main:app --reload --port 8000
+```
 
-The container is designed to deploy to AWS App Runner, Render, or any container platform. A Terraform configuration for App Runner may be provided in a `deploy/` directory as a stretch goal, but is not part of the core build.
+**Terminal 2 — frontend:**
+```bash
+cd frontend
+npm install
+npm run dev        # starts Next.js dev server on port 3000
+```
+
+Open `http://localhost:3000`. The Next.js dev server proxies all `/api/*` requests to `http://localhost:8000` via rewrites configured in `next.config.js` — no CORS setup required.
+
+### FastAPI Static File Serving
+
+In production-like mode, FastAPI mounts `backend/static/` and serves it at `/*`. The Next.js static export writes an `index.html` and all assets there. A catch-all route ensures client-side navigation works (all unmatched paths return `index.html`).
+
+### Database
+
+The SQLite file is created at `db/finally.db` relative to the project root on first startup. Delete this file to reset to the seeded initial state ($10k cash, default watchlist, one portfolio snapshot).
 
 ---
 
@@ -442,9 +474,9 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 
 ### E2E Tests (in `test/`)
 
-**Infrastructure**: A separate `docker-compose.test.yml` in `test/` that spins up the app container plus a Playwright container. This keeps browser dependencies out of the production image.
+**Infrastructure**: Playwright runs locally against the app started in production-like mode (`scripts/start.sh`). A `playwright.config.ts` in `test/` targets `http://localhost:8000` and can optionally launch the server as a `webServer` dependency so tests are self-contained.
 
-**Environment**: Tests run with `LLM_MOCK=true` by default for speed and determinism.
+**Environment**: Tests run with `LLM_MOCK=true` by default for speed and determinism. Set this in a `.env.test` file or export it before running.
 
 **Key Scenarios**:
 - Fresh start: default watchlist appears, $10k balance shown, prices are streaming
@@ -454,3 +486,23 @@ The container is designed to deploy to AWS App Runner, Render, or any container 
 - Portfolio visualization: heatmap renders with correct colors, P&L chart has data points
 - AI chat (mocked): send a message, receive a response, trade execution appears inline
 - SSE resilience: disconnect and verify reconnection
+
+---
+
+## 13. Open Questions
+
+The following items need decisions before the relevant components are built.
+
+**Market Data / SSE**
+
+1. **SSE stream scope**: Does the stream cover watchlist-only, or also tickers held in positions that have been removed from the watchlist? If a user buys AAPL then removes it from the watchlist, does price streaming stop? The frontend needs live prices to compute unrealized P&L for all held positions regardless of watchlist membership.
+
+2. **"Daily change %" definition**: The watchlist panel shows daily change %, but the simulator has no concept of yesterday's close. Define whether this means "change since simulator start", "change since page load", or "change since last tick" so the backend and frontend compute it consistently.
+
+3. **Unknown tickers added to watchlist**: If a user (or the AI) adds a ticker not in the simulator's seed data (e.g., `"XYZ"`), what happens? Does the simulator start a new GBM path for it, or does the backend reject it with a 400 error?
+
+**API**
+
+4. **`GET /api/portfolio` price source**: The positions table stores `avg_cost` but not current price. The endpoint must read current prices from the in-memory cache to compute unrealized P&L. This should be stated explicitly — it means P&L will be zero or stale if the market data background task hasn't started yet.
+
+5. **`/api/health` response shape**: Define what the health endpoint returns. Minimum: `{"status": "ok"}`. Consider also reporting `{"status": "ok", "market_data_source": "simulator"}` for easier debugging.
