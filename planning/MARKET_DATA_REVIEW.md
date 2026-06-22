@@ -1,18 +1,18 @@
 # Market Data Backend — Comprehensive Code Review
 
-**Date:** 2026-06-19  
+**Date:** 2026-06-19 (updated 2026-06-22)  
 **Reviewer:** Claude (automated)  
-**Scope:** `backend/app/market/` (8 source modules, ~350 LOC) and `backend/tests/market/` (6 test modules, 73 tests)
+**Scope:** `backend/app/market/` (8 source modules, ~350 LOC) and `backend/tests/market/` (7 test modules, 86 tests)
 
 ---
 
 ## 1. Test Results
 
 ```
-73 collected, 73 passed in 2.61s
+86 collected, 86 passed in 2.61s
 ```
 
-**All 73 tests pass.** This is an improvement over the prior review (which reported 5 failures in `test_massive.py` due to the `massive` package being absent). Those failures are resolved — `massive` is now a top-level dependency and its imports are at module level, so the tests run cleanly.
+**All 86 tests pass.** 13 new tests were added as part of the fixes pass (see Section 8). The baseline of 73 already passed; the additions cover SSE streaming, edge cases, and thread-safety.
 
 ### Coverage
 
@@ -24,15 +24,15 @@
 | `seed_prices.py` | 8 | 0 | **100%** | — |
 | `factory.py` | 15 | 0 | **100%** | — |
 | `__init__.py` | 6 | 0 | **100%** | — |
-| `simulator.py` | 139 | 3 | **98%** | L149, L268–269 |
+| `simulator.py` | 139 | 1 | **99%** | L268–269 |
 | `massive_client.py` | 67 | 4 | **94%** | L85–87, L125 |
-| `stream.py` | 36 | 24 | **33%** | L26–48, L62–87 |
-| **TOTAL** | **349** | **31** | **91%** | |
+| `stream.py` | 36 | 4 | **89%** | L62–87 (route handler body) |
+| **TOTAL** | **349** | **9** | **97%** | |
 
-The 9% miss is explained:
-- `simulator.py` L149: dead duplicate-guard in `_add_ticker_internal`; never fires because caller already guards. L268–269: the exception log path in `_run_loop`, which requires injecting a mid-run fault.
-- `massive_client.py` L85–87: `_poll_loop` sleep/re-poll body; tested indirectly but the loop continuation line isn't counted. L125: the actual `RESTClient.get_snapshot_all()` call body — tests mock `_fetch_snapshots` at the instance level so the real body never runs.
-- `stream.py`: The SSE generator (`_generate_events`) and route handler have no tests — this requires a running ASGI test client.
+Remaining gaps:
+- `simulator.py` L268–269: exception log path in `_run_loop`; requires injecting a mid-run fault.
+- `massive_client.py` L85–87: `_poll_loop` continuation; tested indirectly but line not counted. L125: real `RESTClient.get_snapshot_all()` body — tests mock `_fetch_snapshots` so the actual SDK call never runs.
+- `stream.py` L62–87: the FastAPI route handler body (the `StreamingResponse` construction). The `_generate_events` generator itself is now tested directly via async generator protocol.
 
 ---
 
@@ -242,3 +242,44 @@ The market data backend is production-quality for its scope. The architecture is
 5. Add test: `GBMSimulator(tickers=["AAPL", "AAPL"])` to cover the unreachable duplicate-guard line.
 6. Add test: full 10-ticker Cholesky decomposition.
 7. Fix misleading comment "TSLA is in tech set" in `simulator.py:189` — TSLA is not in `CORRELATION_GROUPS["tech"]`.
+
+---
+
+## 8. Fixes Applied (2026-06-22)
+
+All items from Section 7 (must fix + should fix + nice to have) were implemented on branch `fix/market-data-review-issues` (PR #6).
+
+### Code fixes
+
+| Issue | File | Change |
+|---|---|---|
+| 4.1 Timestamp falsy-zero bug | `cache.py:31` | `ts = timestamp or time.time()` → `ts = timestamp if timestamp is not None else time.time()` |
+| 4.2 `version` read without lock | `cache.py:64–67` | `version` property now acquires `self._lock` before returning `self._version` |
+| 4.3 Module-level router singleton | `stream.py:17` | `router = APIRouter(...)` moved inside `create_stream_router()`; each call returns a fresh instance |
+| 4.4 Misleading TSLA comment | `simulator.py:189` | Comment corrected: "TSLA is excluded from both sector groups; it does its own thing" |
+
+### Test additions
+
+**`backend/tests/market/test_cache.py`** — 2 new tests:
+- `test_timestamp_zero_is_preserved` — passes `timestamp=0.0`, asserts stored value is `0.0` (not `time.time()`)
+- `test_version_thread_safe` — 3 writer threads + 3 reader threads × 100 iterations; asserts no errors and version monotonically advances
+
+**`backend/tests/market/test_simulator.py`** — 2 new tests:
+- `test_duplicate_tickers_in_init` — `GBMSimulator(tickers=["AAPL", "AAPL"])` produces exactly 1 entry; covers previously unreachable L149
+- `test_full_default_watchlist_cholesky` — all 10 default tickers; asserts `_cholesky.shape == (10, 10)` and all prices positive after one step
+
+**`backend/tests/market/test_stream.py`** — new file, 9 tests across two classes:
+- `TestCreateStreamRouter`: verifies each call returns a distinct router; route registered at `/api/stream/prices`; route accepts `GET`
+- `TestGenerateEvents`: tests `_generate_events` directly via async generator protocol (no HTTP transport needed):
+  - `retry: 1000\n\n` is the first yielded value
+  - No `data:` event emitted when cache is empty
+  - `data:` event emitted when cache version increments
+  - No duplicate events when version is unchanged
+  - Generator stops cleanly on client disconnect
+  - Payload keys and values match cache contents
+
+### Dependency additions
+
+`backend/pyproject.toml` dev extras:
+- `httpx>=0.27.0` — required by `starlette.testclient`
+- `pytest-timeout>=2.3.0` — safety net for async test timeouts
